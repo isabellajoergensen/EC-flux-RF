@@ -9,7 +9,15 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import shap
+import warnings
 from pathlib import Path
+import time
+from datetime import datetime
+
+# Suppress all warnings at import time
+warnings.filterwarnings('ignore')
+import os
+os.environ['PYTHONWARNINGS'] = 'ignore'
 
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
@@ -18,32 +26,25 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import (
     GroupKFold,
     RandomizedSearchCV,
-    train_test_split,
-    cross_val_score
+    cross_val_score,
+    train_test_split
 )
+from sklearn.feature_selection import RFECV
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy.stats import randint
 
+# Suppress sklearn parallel backend warnings
+warnings.filterwarnings('ignore', message='.*sklearn.utils.parallel.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.utils.parallel')
+warnings.filterwarnings('ignore', message='.*delayed.*')
+# Suppress numpy correlation warnings when computing sensitivity
+warnings.filterwarnings('ignore', message='.*invalid value encountered in divide.*')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy')
+
 # Configure matplotlib for better plots
 plt.rcParams['font.size'] = 10
 plt.rcParams['figure.dpi'] = 100
-
-# --- Seasonal transformer --- #
-class SeasonalFeatures(BaseEstimator, TransformerMixin):
-    """Transform datetime to cyclical seasonal features"""
-    def __init__(self, datetime_col='Date'):
-        self.datetime_col = datetime_col
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        X2 = X.copy()
-        doy = X2[self.datetime_col].dt.dayofyear
-        X2['sin_doy'] = np.sin(2 * np.pi * doy / 365)
-        X2['cos_doy'] = np.cos(2 * np.pi * doy / 365)
-        return X2.drop(columns=[self.datetime_col])
 
 # ============================================================================
 # 1. DATA LOADING AND PREPARATION
@@ -56,8 +57,8 @@ print("\n[1/6] Loading and preparing data...")
 
 # Output configuration
 site_ID = "ZaH"
-period = "_GS" # "" for full period, "_GS" for growing season and "_fieldseason" for field season only 
-output_dir = Path(__file__).resolve().parent / "output" / site_ID
+period = "_fieldseason" # "" for full period, "_GS" for growing season and "_fieldseason" for field season only 
+output_dir = Path(__file__).resolve().parent / "output" / site_ID / "NEE_RFE_ZaH"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 # Load data
@@ -71,25 +72,65 @@ data['T_lag1'] = data['TS_0.02'].shift(1)
 """
 
 # Define target and predictors
-target_col = 'NEE_U50_f_mean'
-predictors = ['Snow_Cover_Percentage',
-              'NDVI_Median',
-              'DSSM',
-              'rH_f_mean',
-              'Tair_f_mean',
-              'Tair_f_min',
-              'Tair_f_max',
-              'Rg_f_mean',
-              'Rg_f_min',
-              'Rg_f_max',
-              'VPD_f_mean',
-              #'SWC_5cm', 
-              'SWC_10cm',
-              #'TS_5cm',
-              'TS_10cm',
-              'precipitation_rate']
+target_col = 'NEE_U50_f'
+predictors = [
+    # Seasonal (cyclical) - subject to RFECV
+    'sin_doy',
+    'cos_doy',
+    
+    # Environmental conditions
+    'Snow_Cover_Percentage',
+    'DSSM',
+    'D_SNOW',
+    
+    # Vegetation
+#'NDVI_nonSR_Min',
+    'NDVI_nonSR_Median',
+    'NDVI_nonSR_Max',
+    
+    # Meteorology - current day
+    'RH',
+    'TA',
+    'TA_min',
+    'TA_max',
+    'RG',
+   'RG_min',
+    'RG_max',
+    'VPD_f',
+    'precipitation_rate',
+    
+    # Soil - current day
+    'SWC_10cm',
+    'TS_10cm',
+    
+    # Lagged meteorology (rolling averages)
+    'TA_lag1d',
+    'TA_lag3d',
+    'TA_lag7d',
+    'TA_lag14d',
+    
+    # Lagged soil (rolling averages)
+    'TS_lag1d',
+    'TS_lag3d',
+    'TS_lag7d',
+    'TS_lag14d',
+    'SWC_lag1d',
+     'SWC_lag7d',
+    'SWC_lag3d',
+    'SWC_lag14d',
+    
+    # Lagged precipitation (cumulative sums)
+    'P_lag1d',
+    'P_lag3d',
+    'P_lag7d',
+    'P_lag14d'
+]
 
 
+
+# Compute cyclical seasonal features before dropping NaNs
+data['sin_doy'] = np.sin(2 * np.pi * data['Date'].dt.dayofyear / 365)
+data['cos_doy'] = np.cos(2 * np.pi * data['Date'].dt.dayofyear / 365)
 
 # Drop rows with missing data
 data_clean = data.dropna(subset=[target_col] + predictors).copy()
@@ -120,11 +161,11 @@ X = data_clean[predictors + ['Date']]
 y = data_clean[target_col]
 groups = data_clean['Year']
 
-print(f"\nStrategy: Train/Test Split + Group K-Fold CV")
-print("  • 20% held out for final testing")
+print(f"\nStrategy: Random 80/20 Train/Test Split + Group K-Fold CV")
+print("  • 20% held out for final testing (random split across all years)")
 print("  • Group K-Fold CV on training data\n")
 
-# Hold out 20% for final testing
+# Random 80/20 split
 X_train, X_test, y_train, y_test, groups_train, groups_test = train_test_split(
     X, y, groups,
     test_size=0.2,
@@ -137,92 +178,153 @@ print(f"Test set: {len(X_test)} samples")
 print(f"Training years: {sorted(groups_train.unique())}")
 print(f"Test years: {sorted(groups_test.unique())}")
 
-n_cv_splits = min(5, groups_train.nunique())
+# Use all 8 years for GroupKFold CV (one fold per year)
+n_cv_splits = groups_train.nunique()
 if n_cv_splits < 2:
     raise ValueError("Need at least 2 unique years for GroupKFold.")
 cv_strategy = GroupKFold(n_splits=n_cv_splits)
-n_tune_iter = 50
+print(f"Using {n_cv_splits}-fold GroupKFold CV (one fold per year)")
 
 # ============================================================================
-# 3. HYPERPARAMETER TUNING WITH CROSS-VALIDATION
+# 3. RECURSIVE FEATURE ELIMINATION WITH CROSS-VALIDATION (RFECV)
 # ============================================================================
 
-print("\n[3/6] Performing hyperparameter tuning...")
+print("\n[3/6] Performing feature selection with RFECV...")
 
-# Build preprocessing pipeline
+# Build preprocessing pipeline (scale all predictors including sin_doy and cos_doy)
 preproc = ColumnTransformer([
-    ('season', SeasonalFeatures(datetime_col='Date'), ['Date']),
     ('scale', StandardScaler(), predictors)
 ], remainder='drop')
 
-# Create base pipeline
-base_pipeline = Pipeline([
-    ('pre', preproc),
-    ('rf', RandomForestRegressor(random_state=42, n_jobs=-1))
-])
-
-# Define hyperparameter search space
-# Ranges are constrained toward regularisation to reduce overfitting:
-#   - max_depth: no unlimited trees; cap at 20 to prevent memorisation
-#   - min_samples_leaf: minimum 5 so leaves represent meaningful patterns
-#   - min_samples_split: minimum 10 to avoid splitting on noise
-param_distributions = {
-    'rf__n_estimators': randint(100, 400),
-    'rf__max_depth': [5, 8, 10, 15, 20],
-    'rf__min_samples_split': randint(10, 40),
-    'rf__min_samples_leaf': randint(5, 25),
-    'rf__max_features': ['sqrt', 'log2', 0.3, 0.5],
-    'rf__bootstrap': [True]
-}
-
-# Setup cross-validation for hyperparameter tuning
-tune_cv = cv_strategy.split(X_train, y_train, groups_train)
-X_tune, y_tune, groups_tune = X_train, y_train, groups_train
-
-# Randomized search
-random_search = RandomizedSearchCV(
-    base_pipeline,
-    param_distributions,
-    n_iter=n_tune_iter,
-    cv=tune_cv,
-    scoring='r2',
-    n_jobs=-1,
+# Create Random Forest with DEFAULT parameters (no hyperparameter tuning yet)
+rf_default = RandomForestRegressor(
+    n_estimators=100,      # Default
+    max_depth=None,           # Default (unlimited)
+    max_features='sqrt',   # sqrt(n_features)
     random_state=42,
-    verbose=1
+    min_samples_leaf=1,
+    min_samples_split=2,
+    n_jobs=-1
 )
 
-print(f"Starting randomized search with {n_tune_iter} iterations and {n_cv_splits} CV folds...")
-random_search.fit(X_tune, y_tune)
+print(f"\nRandom Forest Configuration (Default Parameters):")
+print(f"  n_estimators: 100 (default)")
+print(f"  max_depth: 10")
+print(f"  min_samples_split: 10")
+print(f"  min_samples_leaf: 2")
+print(f"  max_features: 'sqrt' (sqrt of n_features)")
+print(f"\nFeature Selection Strategy:")
+print(f"  Method: RFECV (Recursive Feature Elimination with CV)")
+print(f"  CV Strategy: {n_cv_splits}-fold GroupKFold (one fold per year)")
+print(f"  Scoring: R²")
+print(f"  Step size: 1 feature removed per iteration")
+print(f"\n" + "="*70)
+print("STARTING FEATURE ELIMINATION")
+print("="*70)
+print(f"Starting with {len(predictors)} features")
+print(f"This will test models with {len(predictors)} down to 1 feature")
+print(f"Each feature count tested with {n_cv_splits}-fold CV")
+print(f"Estimated total model fits: ~{len(predictors) * n_cv_splits}")
+print(f"Progress updates will show after each feature elimination step\n")
 
-print("\n--- Best Parameters ---")
-for param, value in random_search.best_params_.items():
-    print(f"{param}: {value}")
-print(f"\nBest CV R²: {random_search.best_score_:.4f}")
+# Create RFECV selector with maximum verbosity
+selector = RFECV(
+    estimator=rf_default,
+    step=1,                # Remove 1 feature at a time (most thorough)
+    cv=cv_strategy,
+    scoring='r2',
+    n_jobs=-1,
+    verbose=2              # Maximum verbosity for detailed progress
+)
 
-# Get best model
-best_pipeline = random_search.best_estimator_
+# Build full pipeline with preprocessing + feature selection
+feature_selection_pipeline = Pipeline([
+    ('pre', preproc),
+    ('selector', selector)
+])
 
+print(f"Pipeline created. Beginning feature elimination...")
+print(f"Start time: {datetime.now().strftime('%H:%M:%S')}\n")
+
+start_time = time.time()
+
+# Fit RFECV with progress tracking
+try:
+    feature_selection_pipeline.fit(X_train, y_train, selector__groups=groups_train)
+    elapsed_time = time.time() - start_time
+    print(f"\n{'='*70}")
+    print(f"RFECV COMPLETE")
+    print(f"{'='*70}")
+    print(f"End time: {datetime.now().strftime('%H:%M:%S')}")
+    print(f"Total elapsed time: {elapsed_time/60:.1f} minutes ({elapsed_time:.0f} seconds)")
+except Exception as e:
+    elapsed_time = time.time() - start_time
+    print(f"\nERROR after {elapsed_time/60:.1f} minutes: {e}")
+    raise
+
+# Get results
+n_features_optimal = selector.n_features_
+feature_support = selector.support_
+feature_ranking = selector.ranking_
+
+# Extract selected and removed features (all predictors evaluated equally)
+selected_features = [predictors[i] for i in range(len(predictors)) if feature_support[i]]
+removed_features = [predictors[i] for i in range(len(predictors)) if not feature_support[i]]
+
+print("\n" + "="*70)
+print("FEATURE SELECTION RESULTS")
+print("="*70)
+print(f"\nOptimal number of features: {n_features_optimal}/{len(predictors)}")
+print(f"Features removed: {len(removed_features)}")
+
+if removed_features:
+    print(f"\n--- Removed Features ---")
+    for feat in removed_features:
+        rank = feature_ranking[predictors.index(feat)]
+        print(f"  {feat} (rank: {rank})")
+
+print(f"\n--- Selected Features ---")
+for feat in selected_features:
+    print(f"  ✓ {feat}")
+
+print(f"\n--- CV Performance vs Number of Features ---")
+for n_feat, score in enumerate(selector.cv_results_['mean_test_score'], start=1):
+    marker = " ← OPTIMAL" if n_feat == n_features_optimal else ""
+    print(f"  {n_feat:2d} features: R² = {score:.4f}{marker}")
+
+# Prepare data with selected features only (keep Date for later export/plotting)
+X_train_selected = X_train[selected_features + ['Date']]
+X_test_selected = X_test[selected_features + ['Date']]
+
+# Build NEW preprocessing pipeline for selected features only
+preproc_selected = ColumnTransformer([
+    ('scale', StandardScaler(), selected_features)
+], remainder='drop')
+
+# Build final model with selected features
+final_pipeline = Pipeline([
+    ('pre', preproc_selected),
+    ('rf', rf_default)
+])
+
+# Fit on training data with selected features
+final_pipeline.fit(X_train_selected, y_train)
+best_pipeline = final_pipeline  # For compatibility with downstream code
 # ============================================================================
 # 4. MODEL EVALUATION
 # ============================================================================
 
-print("\n[4/6] Evaluating model performance...")
+print("\n[4/6] Evaluating model performance with selected features...")
 
-cv_scores = cross_val_score(
-    best_pipeline,
-    X_train,
-    y_train,
-    cv=cv_strategy.split(X_train, y_train, groups_train),
-    scoring='r2',
-    n_jobs=-1
-)
+# Use RFECV CV results (already computed)
+cv_scores = selector.cv_results_['mean_test_score']
+cv_best_score = cv_scores[n_features_optimal - 1]  # -1 for 0-indexing
 
-print(f"\nCross-Validation R² (mean ± std): {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
-print(f"R² per fold: {np.round(cv_scores, 4)}")
+print(f"\nBest CV R² (with {n_features_optimal} features): {cv_best_score:.4f}")
 
-# Test set evaluation
-y_pred_train = best_pipeline.predict(X_train)
-y_pred_test = best_pipeline.predict(X_test)
+# Test set evaluation with selected features
+y_pred_train = best_pipeline.predict(X_train_selected)
+y_pred_test = best_pipeline.predict(X_test_selected)
 
 # Calculate metrics
 train_r2 = r2_score(y_train, y_pred_train)
@@ -233,12 +335,30 @@ test_r2 = r2_score(y_test, y_pred_test)
 test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
 test_mae = mean_absolute_error(y_test, y_pred_test)
 
-print("\n--- Model Performance ---")
-print(f"{'Metric':<15} {'Train':<15} {'Test':<15}")
-print("-" * 45)
-print(f"{'R²':<15} {train_r2:<15.4f} {test_r2:<15.4f}")
-print(f"{'RMSE':<15} {train_rmse:<15.4f} {test_rmse:<15.4f}")
-print(f"{'MAE':<15} {train_mae:<15.4f} {test_mae:<15.4f}")
+print("\n--- Model Performance (with selected features) ---")
+print(f"{'Metric':<15} {'CV':<15} {'Train':<15} {'Test':<15}")
+print("-" * 60)
+print(f"{'R²':<15} {cv_best_score:<15.4f} {train_r2:<15.4f} {test_r2:<15.4f}")
+print(f"{'RMSE':<15} {'N/A':<15} {train_rmse:<15.4f} {test_rmse:<15.4f}")
+print(f"{'MAE':<15} {'N/A':<15} {train_mae:<15.4f} {test_mae:<15.4f}")
+
+print(f"\nTrain-Test R² Gap: {train_r2 - test_r2:.4f} "
+      f"({'⚠ check overfitting' if train_r2 - test_r2 > 0.15 else '✓ acceptable'})")
+
+# Per-year test set performance
+print(f"\n--- Test Set Performance by Year ---")
+test_years_unique = sorted(groups_test.unique())
+for year in test_years_unique:
+    year_mask = groups_test == year
+    y_year_test = y_test[year_mask]
+    y_year_pred = y_pred_test[year_mask]
+    
+    year_r2 = r2_score(y_year_test, y_year_pred)
+    year_rmse = np.sqrt(mean_squared_error(y_year_test, y_year_pred))
+    year_mae = mean_absolute_error(y_year_test, y_year_pred)
+    
+    print(f"Year {year} (n={year_mask.sum()}): "
+          f"R² = {year_r2:.4f}, RMSE = {year_rmse:.4f}, MAE = {year_mae:.4f}")
 
 year_metrics = None
 
@@ -248,12 +368,12 @@ year_metrics = None
 
 print("\n[5/6] Performing SHAP analysis...")
 
-# Prepare feature names (after transformation)
-feature_names = ['sin_doy', 'cos_doy'] + predictors
+# Prepare feature names (after transformation) - use selected features only
+feature_names = selected_features
 
-# Transform data for SHAP
-X_train_transformed = best_pipeline.named_steps['pre'].transform(X_train)
-X_test_transformed = best_pipeline.named_steps['pre'].transform(X_test)
+# Transform data for SHAP - use selected feature datasets
+X_train_transformed = best_pipeline.named_steps['pre'].transform(X_train_selected)
+X_test_transformed = best_pipeline.named_steps['pre'].transform(X_test_selected)
 
 # Create SHAP explainer
 rf_model = best_pipeline.named_steps['rf']
@@ -271,20 +391,14 @@ shap_values = explainer.shap_values(X_test_sample)
 print("Computing SHAP values for full test set (for export)...")
 shap_values_full = explainer.shap_values(X_test_transformed)
 
-# Prepare raw (unscaled) data for SHAP plots
-X_test_reset = X_test.iloc[sample_idx].reset_index(drop=True)
-doy = X_test_reset['Date'].dt.dayofyear
-X_test_raw = X_test_reset[predictors].copy()
-X_test_raw['sin_doy'] = np.sin(2 * np.pi * doy / 365)
-X_test_raw['cos_doy'] = np.cos(2 * np.pi * doy / 365)
+# Prepare raw (unscaled) data for SHAP plots - use selected features
+X_test_reset = X_test_selected.iloc[sample_idx].reset_index(drop=True)
+X_test_raw = X_test_reset[selected_features].copy()
 X_test_raw = X_test_raw[feature_names]
 
-# Prepare raw (unscaled) data for full test set (for export)
-X_test_reset_full = X_test.reset_index(drop=True)
-doy_full = X_test_reset_full['Date'].dt.dayofyear
-X_test_raw_full = X_test_reset_full[predictors].copy()
-X_test_raw_full['sin_doy'] = np.sin(2 * np.pi * doy_full / 365)
-X_test_raw_full['cos_doy'] = np.cos(2 * np.pi * doy_full / 365)
+# Prepare raw (unscaled) data for full test set (for export) - use selected features
+X_test_reset_full = X_test_selected.reset_index(drop=True)
+X_test_raw_full = X_test_reset_full[selected_features].copy()
 X_test_raw_full = X_test_raw_full[feature_names]
 
 # ============================================================================
@@ -358,18 +472,31 @@ plt.savefig(output_dir / '02_residuals_analysis.png', dpi=300, bbox_inches='tigh
 print("✓ Saved: 02_residuals_analysis.png")
 plt.close()
 
-# --- Plot 3: Feature Importance (from Random Forest) ---
+# --- Plot 3: Feature Selection Results ---
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+# Left: CV R² vs Number of Features
+n_features_range = range(1, len(selector.cv_results_['mean_test_score']) + 1)
+ax1.plot(n_features_range, selector.cv_results_['mean_test_score'], 'o-', linewidth=2, markersize=6)
+ax1.axvline(x=n_features_optimal, color='r', linestyle='--', linewidth=2, 
+            label=f'Optimal: {n_features_optimal} features')
+ax1.set_xlabel('Number of Features', fontsize=12)
+ax1.set_ylabel('CV R² Score', fontsize=12)
+ax1.set_title('RFECV: Model Performance vs Feature Count', fontsize=13, fontweight='bold')
+ax1.grid(True, alpha=0.3)
+ax1.legend(fontsize=11)
+
+# Right: Feature Importance (from final RF model)
 rf_importances = rf_model.feature_importances_
 importance_df = pd.DataFrame({
     'Feature': feature_names,
     'Importance': rf_importances
 }).sort_values('Importance', ascending=False)
 
-fig, ax = plt.subplots(figsize=(10, 6))
-bars = ax.barh(importance_df['Feature'], importance_df['Importance'])
-ax.set_xlabel('Feature Importance (Mean Decrease in Impurity)')
-ax.set_title('Random Forest Feature Importance')
-ax.grid(True, alpha=0.3, axis='x')
+bars = ax2.barh(importance_df['Feature'], importance_df['Importance'])
+ax2.set_xlabel('Feature Importance (MDI)', fontsize=12)
+ax2.set_title('Selected Features - RF Importance', fontsize=13, fontweight='bold')
+ax2.grid(True, alpha=0.3, axis='x')
 
 # Color bars
 colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(bars)))
@@ -377,8 +504,8 @@ for bar, color in zip(bars, colors):
     bar.set_color(color)
 
 plt.tight_layout()
-plt.savefig(output_dir / '03_feature_importance_rf.png', dpi=300, bbox_inches='tight')
-print("✓ Saved: 03_feature_importance_rf.png")
+plt.savefig(output_dir / '03_feature_selection_results.png', dpi=300, bbox_inches='tight')
+print("✓ Saved: 03_feature_selection_results.png")
 plt.close()
 
 # --- Plot 4: SHAP Summary Plot (Feature Importance) ---
@@ -516,11 +643,28 @@ metrics_df = pd.DataFrame({
     'Metric': ['R²', 'RMSE', 'MAE'],
     'Training': [train_r2, train_rmse, train_mae],
     'Test': [test_r2, test_rmse, test_mae],
-    'CV_Mean': [cv_scores.mean(), np.nan, np.nan],
-    'CV_Std': [cv_scores.std(), np.nan, np.nan]
+    'CV_Best': [cv_best_score, np.nan, np.nan],
+    'N_Features': [n_features_optimal, np.nan, np.nan]
 })
 metrics_df.to_csv(output_dir / 'model_performance_metrics.csv', index=False)
 print("✓ Saved: model_performance_metrics.csv")
+
+# Export feature selection results
+feature_selection_df = pd.DataFrame({
+    'Feature': predictors,
+    'Selected': feature_support,
+    'Ranking': feature_ranking
+}).sort_values('Ranking')
+feature_selection_df.to_csv(output_dir / 'feature_selection_results.csv', index=False)
+print("✓ Saved: feature_selection_results.csv")
+
+# Export RFECV performance curve
+rfecv_performance_df = pd.DataFrame({
+    'N_Features': list(range(1, len(selector.cv_results_['mean_test_score']) + 1)),
+    'CV_R2': selector.cv_results_['mean_test_score']
+})
+rfecv_performance_df.to_csv(output_dir / 'rfecv_performance_curve.csv', index=False)
+print("✓ Saved: rfecv_performance_curve.csv")
 
 # Export feature importance
 importance_df.to_csv(output_dir / 'feature_importance.csv', index=False)
@@ -547,23 +691,28 @@ print("✓ Saved: shap_values.csv")
 
 # Export predictions with metadata
 predictions_df = pd.DataFrame({
-    'Date': X_test['Date'].values,
+    'Date': X_test_selected['Date'].values,
     'Observed_NEE': y_test.values,
     'Predicted_NEE': y_pred_test,
     'Residual': residuals_test.values,
     'Abs_Residual': np.abs(residuals_test.values)
 })
-for i, pred_name in enumerate(predictors):
-    predictions_df[pred_name] = X_test[pred_name].values
+for pred_name in selected_features:
+    predictions_df[pred_name] = X_test_selected[pred_name].values
 predictions_df.to_csv(output_dir / 'test_predictions.csv', index=False)
 print("✓ Saved: test_predictions.csv")
 
-# Export best hyperparameters
-best_params_df = pd.DataFrame([
-    {'Parameter': k, 'Value': v} for k, v in random_search.best_params_.items()
+# Export default RF parameters used
+default_params_df = pd.DataFrame([
+    {'Parameter': 'n_estimators', 'Value': 100},
+    {'Parameter': 'max_depth', 'Value': 'None'},
+    {'Parameter': 'min_samples_split', 'Value': 2},
+    {'Parameter': 'min_samples_leaf', 'Value': 1},
+    {'Parameter': 'max_features', 'Value': 'sqrt'},
+    {'Parameter': 'Note', 'Value': 'Default RF parameters - hyperparameter tuning to be done later'}
 ])
-best_params_df.to_csv(output_dir / 'best_hyperparameters.csv', index=False)
-print("✓ Saved: best_hyperparameters.csv")
+default_params_df.to_csv(output_dir / 'rf_default_parameters.csv', index=False)
+print("✓ Saved: rf_default_parameters.csv")
 
 # ============================================================================
 # SUMMARY
@@ -593,24 +742,24 @@ print("="*70)
 
 print("\n[Final] Fitting final model on full dataset and exporting SHAP values...")
 
-# Refit the best pipeline on all available cleaned data
-best_pipeline.fit(X, y)
+# Create full dataset with selected features only
+X_full_selected = X[selected_features + ['Date']]
+
+# Refit the best pipeline on all available cleaned data (with selected features)
+best_pipeline.fit(X_full_selected, y)
 
 # Predict NEE for the full dataset
-full_pred = best_pipeline.predict(X)
+full_pred = best_pipeline.predict(X_full_selected)
 
 # SHAP values for all rows in the full dataset
-X_full_transformed = best_pipeline.named_steps['pre'].transform(X)
+X_full_transformed = best_pipeline.named_steps['pre'].transform(X_full_selected)
 rf_model_full = best_pipeline.named_steps['rf']
 explainer_full = shap.TreeExplainer(rf_model_full)
 shap_values_full_dataset = explainer_full.shap_values(X_full_transformed)
 
 # Prepare raw full-data features with seasonal terms for export
-X_full_reset = X.reset_index(drop=True)
-doy_all = X_full_reset['Date'].dt.dayofyear
-X_full_raw = X_full_reset[predictors].copy()
-X_full_raw['sin_doy'] = np.sin(2 * np.pi * doy_all / 365)
-X_full_raw['cos_doy'] = np.cos(2 * np.pi * doy_all / 365)
+X_full_reset = X_full_selected.reset_index(drop=True)
+X_full_raw = X_full_reset[selected_features].copy()
 X_full_raw = X_full_raw[feature_names]
 
 # Export full-dataset predictions + SHAP values
