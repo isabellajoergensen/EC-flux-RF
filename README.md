@@ -54,6 +54,12 @@ In VS Code:
 
 In the terminal, run:
 
+Windows (if `python` command doesn't work):
+```powershell
+py -m venv .venv
+```
+
+macOS/Linux (or if `python` works on Windows):
 ```bash
 python -m venv .venv
 ```
@@ -89,6 +95,13 @@ Important:
 
 With the virtual environment active, run:
 
+Windows:
+```powershell
+py -m pip install --upgrade pip
+py -m pip install -r requirements.txt
+```
+
+macOS/Linux:
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
@@ -108,6 +121,18 @@ This is recommended because it makes sure the Run button, debugging, and new ter
 
 Run either script from the terminal:
 
+Windows:
+```powershell
+py NEE_shap_analysis_modified.py
+```
+
+or
+
+```powershell
+py Plots.py
+```
+
+macOS/Linux:
 ```bash
 python NEE_shap_analysis_modified.py
 ```
@@ -136,10 +161,19 @@ You do not need to reinstall dependencies every time.
 
 ## Troubleshooting
 
-### "python is not recognized" (Windows)
+### "python is not recognized" or "Python was not found" (Windows)
 
-Python is not available in your PATH.
-- Reinstall Python from python.org and check "Add Python to PATH" during install.
+This happens when Windows redirects `python` to the Microsoft Store.
+
+Quick fix: Use `py` instead of `python` in all commands.
+
+Permanent fix:
+1. Open Settings > Apps > Advanced app settings > App execution aliases.
+2. Turn OFF the aliases for "python.exe" and "python3.exe".
+3. Restart VS Code.
+
+If `py` also doesn't work, Python may not be installed:
+- Install Python from python.org and check "Add Python to PATH" during install.
 - Then close and reopen VS Code.
 
 ### PowerShell says script execution is disabled
@@ -162,7 +196,7 @@ Usually means dependencies are not installed in the active environment.
 
 Fix:
 1. Make sure `(.venv)` appears in terminal.
-2. Run:
+2. Run (use `py` on Windows if `python` doesn't work):
 
 ```bash
 python -m pip install -r requirements.txt

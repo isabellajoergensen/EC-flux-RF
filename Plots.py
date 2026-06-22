@@ -12,6 +12,103 @@ import matplotlib.dates as mdates
 
 SITE_IDS = ["ZaF", "ZaH"]
 
+def _get_feature_color_map(feature_cols):
+	"""Assign colors to features based on variable type/category."""
+	import matplotlib.colors as mcolors
+	
+	color_map = {}
+	for col in feature_cols:
+		feat = col.replace("SHAP_", "")
+		
+		# Temperature variables (TA) - Red/Orange shades
+		if feat.startswith("TA"):
+			if "lag1d" in feat or feat == "TA_min":
+				color_map[col] = "#ff4d4d"  # light red
+			elif "lag3d" in feat or feat == "TA":
+				color_map[col] = "#ff0000"  # red
+			elif "lag7d" in feat or feat == "TA_max":
+				color_map[col] = "#cc0000"  # dark red
+			elif "lag14d" in feat:
+				color_map[col] = "#8b0000"  # very dark red
+		
+		# Soil temperature (TS) - Brown/Tan shades
+		elif feat.startswith("TS"):
+			if "lag3d" in feat or feat == "TS_10cm":
+				color_map[col] = "#d2691e"  # chocolate
+			elif "lag7d" in feat:
+				color_map[col] = "#8b4513"  # saddle brown
+			elif "lag14d" in feat or "lag1d" in feat:
+				color_map[col] = "#654321"  # dark brown
+		
+		# Soil water content (SWC) - Blue shades
+		elif feat.startswith("SWC"):
+			if "lag1d" in feat or feat == "SWC_10cm":
+				color_map[col] = "#87ceeb"  # sky blue
+			elif "lag3d" in feat:
+				color_map[col] = "#4169e1"  # royal blue
+			elif "lag7d" in feat:
+				color_map[col] = "#0000cd"  # medium blue
+			elif "lag14d" in feat:
+				color_map[col] = "#00008b"  # dark blue
+		
+		# Radiation (RG) - Yellow/Gold shades
+		elif feat.startswith("RG"):
+			if feat == "RG_min":
+				color_map[col] = "#ffd700"  # gold
+			elif feat == "RG":
+				color_map[col] = "#ffaa00"  # orange-gold
+			elif feat == "RG_max":
+				color_map[col] = "#ff8c00"  # dark orange
+		
+		# Precipitation (P) - Teal/Cyan shades
+		elif feat.startswith("P_lag") or feat == "precipitation_rate":
+			if "lag1d" in feat or feat == "precipitation_rate":
+				color_map[col] = "#40e0d0"  # turquoise
+			elif "lag3d" in feat:
+				color_map[col] = "#20b2aa"  # light sea green
+			elif "lag7d" in feat:
+				color_map[col] = "#008b8b"  # dark cyan
+			elif "lag14d" in feat:
+				color_map[col] = "#006666"  # darker cyan
+		
+		# Snow variables - Light blue/gray shades
+		elif "Snow" in feat or feat in ["DSSM", "D_SNOW"]:
+			if "Snow_Cover" in feat:
+				color_map[col] = "#b0e0e6"  # powder blue
+			elif feat == "DSSM":
+				color_map[col] = "#add8e6"  # light blue
+			elif feat == "D_SNOW":
+				color_map[col] = "#87ceeb"  # sky blue
+		
+		# VPD and RH - Purple shades
+		elif feat in ["VPD_f", "RH"]:
+			if feat == "VPD_f":
+				color_map[col] = "#9370db"  # medium purple
+			elif feat == "RH":
+				color_map[col] = "#8b008b"  # dark magenta
+		
+		# NDVI - Green shades
+		elif "NDVI" in feat:
+			if "Min" in feat:
+				color_map[col] = "#90ee90"  # light green
+			elif "Median" in feat:
+				color_map[col] = "#32cd32"  # lime green
+			elif "Max" in feat:
+				color_map[col] = "#228b22"  # forest green
+		
+		# Seasonal - Gray shades
+		elif "sin_doy" in feat or "cos_doy" in feat:
+			if "sin" in feat:
+				color_map[col] = "#a9a9a9"  # dark gray
+			elif "cos" in feat:
+				color_map[col] = "#808080"  # gray
+		
+		# Default fallback for unknown features
+		else:
+			color_map[col] = "#696969"  # dim gray
+	
+	return color_map
+
 def _mean_abs_by_group(df, group_col, shap_cols):
 	grouped = df.groupby(group_col)[shap_cols].apply(lambda x: x.abs().mean())
 	return grouped
@@ -253,8 +350,7 @@ def plot_yearly_mean_sd_bars(df, shap_cols, plots_dir, top_n=6):
 
 def plot_weekly_stacked_bars_with_nee(df_shap, df_nee, shap_cols, plots_dir):
 	all_cols = list(shap_cols)
-	colors = plt.cm.tab20(np.linspace(0, 1, len(all_cols)))
-	color_map = {col: colors[i] for i, col in enumerate(all_cols)}
+	color_map = _get_feature_color_map(all_cols)
 
 	shap_weekly = df_shap.copy()
 	shap_weekly["Week"] = shap_weekly["Date"].dt.to_period("W").dt.start_time
@@ -305,8 +401,7 @@ def plot_weekly_stacked_bars_with_nee(df_shap, df_nee, shap_cols, plots_dir):
 
 def plot_daily_stacked_bars_with_nee(df_shap, df_nee, shap_cols, plots_dir):
 	all_cols = list(shap_cols)
-	colors = plt.cm.tab20(np.linspace(0, 1, len(all_cols)))
-	color_map = {col: colors[i] for i, col in enumerate(all_cols)}
+	color_map = _get_feature_color_map(all_cols)
 
 	shap_daily = df_shap.copy()
 	shap_daily["Day"] = shap_daily["Date"].dt.floor("D")
@@ -356,8 +451,7 @@ def plot_daily_stacked_bars_with_nee(df_shap, df_nee, shap_cols, plots_dir):
 
 def plot_biweekly_stacked_bars_with_nee(df_shap, df_nee, shap_cols, plots_dir):
 	all_cols = list(shap_cols)
-	colors = plt.cm.tab20(np.linspace(0, 1, len(all_cols)))
-	color_map = {col: colors[i] for i, col in enumerate(all_cols)}
+	color_map = _get_feature_color_map(all_cols)
 
 	shap_biweekly = df_shap.copy()
 	shap_biweekly["BiWeek"] = shap_biweekly["Date"].dt.to_period("2W").dt.start_time
@@ -451,8 +545,7 @@ def plot_stacked_bars_two_sites(
 		data_by_site[site] = {"shap": period_shap, "nee": period_nee, "cols": shap_cols}
 
 	all_cols = sorted(all_cols)
-	colors = plt.cm.tab20(np.linspace(0, 1, max(1, len(all_cols))))
-	color_map = {col: colors[i] for i, col in enumerate(all_cols)}
+	color_map = _get_feature_color_map(all_cols)
 
 	fig, axes = plt.subplots(len(site_ids), 1, figsize=(14, 8), sharey=False)
 	if len(site_ids) == 1:
@@ -561,8 +654,7 @@ def plot_stacked_bars_two_sites_by_year_may_nov(
 	if not years_union:
 		raise ValueError("No Jun-Sep data found for requested full-dataset combined plot.")
 
-	colors = plt.cm.tab20(np.linspace(0, 1, max(1, len(all_cols))))
-	color_map = {col: colors[i] for i, col in enumerate(all_cols)}
+	color_map = _get_feature_color_map(all_cols)
 
 	fig, axes = plt.subplots(
 		len(site_ids),
@@ -818,8 +910,7 @@ def plot_weekly_stacked_bars_two_sites_full_dataset_continuous(base_dir, plots_d
 		if len(year_positions):
 			year_label_positions.append((year_positions.mean() * bar_step, str(year)))
 
-	colors = plt.cm.tab20(np.linspace(0, 1, max(1, len(all_cols))))
-	color_map = {col: colors[i] for i, col in enumerate(all_cols)}
+	color_map = _get_feature_color_map(all_cols)
 
 	fig, axes = plt.subplots(len(site_ids), 1, figsize=(10, 6.5), sharex=True, sharey=False)
 	if len(site_ids) == 1:
@@ -901,8 +992,7 @@ def plot_weekly_stacked_bars_two_sites_full_dataset_continuous(base_dir, plots_d
 
 def plot_monthly_stacked_bars_with_nee(df_shap, df_nee, shap_cols, plots_dir):
 	all_cols = list(shap_cols)
-	colors = plt.cm.tab20(np.linspace(0, 1, len(all_cols)))
-	color_map = {col: colors[i] for i, col in enumerate(all_cols)}
+	color_map = _get_feature_color_map(all_cols)
 
 	shap_monthly = df_shap.copy()
 	shap_monthly["MonthStart"] = shap_monthly["Date"].dt.to_period("M").dt.start_time
@@ -969,8 +1059,7 @@ def plot_full_dataset_observed_predicted_line(df_full, plots_dir, site_id):
 
 def plot_monthly_mean_shap_stacked_with_nee(df_full, shap_cols, plots_dir, site_id):
 	all_cols = list(shap_cols)
-	colors = plt.cm.tab20(np.linspace(0, 1, len(all_cols)))
-	color_map = {col: colors[i] for i, col in enumerate(all_cols)}
+	color_map = _get_feature_color_map(all_cols)
 
 	monthly_shap = df_full.groupby("Month")[all_cols].mean().reindex(range(1, 13)).fillna(0.0)
 	monthly_nee = df_full.groupby("Month")["Observed_NEE"].mean().reindex(range(1, 13))
