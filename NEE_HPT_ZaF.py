@@ -54,7 +54,7 @@ print("\n[1/7] Loading configuration and features...")
 
 # Output configuration
 site_ID = "ZaF"
-period = "_fieldseason"  # "" for full period, "_GS" for growing season and "_fieldseason" for field season only
+period = "_fieldseason"  # "" for full period and "_fieldseason" for field season only
 output_dir = Path(__file__).resolve().parent / "output" / site_ID / "NEE_HPT_ZaF"
 output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -73,16 +73,16 @@ selected_features = [
     'DSSM',
     
     # Vegetation
-    'NDVI_nonSR_Median',
+    #'NDVI_nonSR_Median',
     'NDVI_nonSR_Max',
     
     # Meteorology - current day
-    'TA',
-    'TA_min',
-    'TA_max',
-    'RG',
+    #'TA',
+    #'TA_min',
+    #'TA_max',
+    #'RG',
     'RG_min',
-    'RG_max',
+    #'RG_max',
     'precipitation_rate',
     
     # Soil - current day
@@ -90,22 +90,26 @@ selected_features = [
     'TS_10cm',
     
     # Lagged meteorology (rolling averages)
-    'TA_lag3d',
+    #'TA_lag1d'
+    #'TA_lag3d',
     'TA_lag7d',
-    'TA_lag14d',
+    #'TA_lag14d',
     
     # Lagged soil (rolling averages)
-    'TS_lag1d',
+    #'TS_lag1d',
     'TS_lag3d',
-    'TS_lag7d',
-    'TS_lag14d',
-    'SWC_lag1d',
-    'SWC_lag3d',
-    'SWC_lag7d',
+    #'TS_lag7d',
+    #'TS_lag14d',
+    #'SWC_lag1d',
+    #'SWC_lag3d',
+    #'SWC_lag7d',
     'SWC_lag14d',
     
     # Lagged precipitation (cumulative sums)
-    'P_lag14d'
+    #'P_lag1d',
+    #'P_lag3d',
+    'P_lag7d',
+    #'P_lag14d'
 ]
 
 print(f"\nTotal features selected: {len(selected_features)}")
@@ -662,6 +666,28 @@ for pred_name in selected_features:
     predictions_df[pred_name] = X_test[pred_name].values
 predictions_df.to_csv(output_dir / 'test_predictions_HPT.csv', index=False)
 print("✓ Saved: test_predictions_HPT.csv")
+
+X_full = X.reset_index(drop=True)
+y_full = y.reset_index(drop=True)
+X_full_transformed = best_pipeline.named_steps['pre'].transform(X_full)
+y_pred_full = best_pipeline.predict(X_full)
+residuals_full = y_full - y_pred_full
+shap_values_full_dataset = explainer.shap_values(X_full_transformed)
+
+full_dataset_df = pd.DataFrame({
+    'Date': X_full['Date'].values,
+    'Year': X_full['Date'].dt.year.values,
+    'Month': X_full['Date'].dt.month.values,
+    'Observed_NEE': y_full.values,
+    'Predicted_NEE': y_pred_full,
+    'Residual': residuals_full.values,
+    'Abs_Residual': np.abs(residuals_full.values)
+})
+full_shap_columns = [f"SHAP_{name}" for name in feature_names]
+full_shap_df = pd.DataFrame(shap_values_full_dataset, columns=full_shap_columns)
+full_dataset_df = pd.concat([full_dataset_df, full_shap_df], axis=1)
+full_dataset_df.to_csv(output_dir / 'full_dataset_predictions_shap_values.csv', index=False)
+print("✓ Saved: full_dataset_predictions_shap_values.csv")
 
 # ============================================================================
 # 9. COMPARISON WITH STAGE 1 (RFE Model)

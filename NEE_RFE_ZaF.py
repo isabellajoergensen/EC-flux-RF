@@ -56,8 +56,8 @@ print("="*70)
 print("\n[1/6] Loading and preparing data...")
 
 # Output configuration
-site_ID = "ZaH"
-period = "_fieldseason" # "" for full period, "_GS" for growing season and "_fieldseason" for field season only 
+site_ID = "ZaF"
+period = "_fieldseason" # " " for full period, "_fieldseason" for field season only 
 output_dir = Path(__file__).resolve().parent / "output" / site_ID / "NEE_RFE_ZaF"
 output_dir.mkdir(parents=True, exist_ok=True)
 

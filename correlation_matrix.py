@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Configuration
-site_ID = "ZaH"
+site_ID = "ZaF"
 period = "_fieldseason"  # "" for full period, "_GS" for growing season, "_fieldseason" for field season
 output_dir = Path(__file__).resolve().parent / "output" / site_ID
 output_dir.mkdir(parents=True, exist_ok=True)
